@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    diag::{Diagnostic, Diagnostics},
+    diag::{Diagnostic, DiagnosticLevel, Diagnostics},
     vfs::{OverlayFS, RealFS, VFS},
 };
 use clap::Parser;
@@ -47,6 +47,11 @@ struct Cli {
 
     #[arg(long = "quiet", short = 'q', help = "Suppress diagnostic output")]
     quiet: bool,
+    #[arg(
+        long = "fail-on-error",
+        help = "Exit with status 1 when translation reported errors (by default the status is 0 and the errors are carried into F* by TranslationErrors.fst)"
+    )]
+    fail_on_error: bool,
 
     #[arg(short = 'I', help = "Additional include search paths")]
     include_paths: Vec<String>,
@@ -316,8 +321,29 @@ fn main() {
 
     if !cli.quiet {
         diags.print_to_stderr(&mut *vfs);
+        let errors = diags
+            .diags
+            .iter()
+            .filter(|d| d.level == DiagnosticLevel::Error)
+            .count();
+        let warnings = diags.diags.len() - errors;
+        if errors + warnings > 0 {
+            eprintln!(
+                "pal: {} error(s), {} warning(s){}",
+                errors,
+                warnings,
+                if cli.outdir.is_some() {
+                    " (all in <outdir>/diagnostics.json)"
+                } else {
+                    ""
+                }
+            );
+        }
     }
+    // Errors are carried into F* by the TranslationErrors.fst sentinel, so
+    // by design they do not fail the translation itself; a script that wants
+    // to stop here asks for it with --fail-on-error.
     if diags.has_errors() {
-        std::process::exit(0)
+        std::process::exit(if cli.fail_on_error { 1 } else { 0 })
     }
 }

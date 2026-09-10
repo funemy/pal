@@ -2772,7 +2772,28 @@ impl<'a> Emitter<'a> {
                     {
                         return self.emit_name(Name::GlobalAddr(x.val.clone()));
                     }
-                    self.emit_lvalue(env, v)
+                    match self.emit_expr(env, v) {
+                        ExprKind::LValue(doc) => doc,
+                        _ => {
+                            // The address of an array element is a borrowed cell
+                            // and only exists in the contexts that hoist the
+                            // borrow (`hoist_cell_borrow`); anything else that
+                            // has no lvalue has no address to take.
+                            self.report(
+                                format!(
+                                    "cannot take the address of `{}` here: `&a[i]` and \
+                                     `&a[i].f` on an `_array` or fixed-size array are \
+                                     supported as a call argument for a `T *` parameter \
+                                     and as a store into a `T *` local, where the cell is \
+                                     borrowed with `array_borrow_cell`; other operands of \
+                                     `&` must be a variable, a field or a `_pure` global",
+                                    v
+                                ),
+                                &v.loc,
+                            );
+                            Doc::text("(admit())")
+                        }
+                    }
                 }
                 ExprT::Cast(val, to_ty) => {
                     let val_doc = self.emit_rvalue(env, val);
