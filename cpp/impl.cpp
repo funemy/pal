@@ -1668,6 +1668,19 @@ public:
     } else if (auto *co = dyn_cast<ConditionalOperator>(e)) {
       return mk_cond(std::move(loc), trRValue(co->getCond()),
                      trRValue(co->getTrueExpr()), trRValue(co->getFalseExpr()));
+    } else if (auto *bco = dyn_cast<BinaryConditionalOperator>(e)) {
+      // GNU `a ?: b` evaluates `a` once; desugaring to `a ? a : b`
+      // duplicates that evaluation, so only side-effect-free left operands
+      // are accepted.
+      if (!bco->getCommon()->HasSideEffects(*astCtx)) {
+        return mk_cond(std::move(loc), trRValue(bco->getCommon()),
+                       trRValue(bco->getCommon()),
+                       trRValue(bco->getFalseExpr()));
+      }
+      reportUnsupported(e->getSourceRange(), loc,
+                        "GNU ?: with a side-effecting left operand", "");
+      return mk_rvalue_err(std::move(loc),
+                           trQualType(e->getType(), e->getSourceRange()));
     } else if (auto *dre = dyn_cast<DeclRefExpr>(e)) {
       if (auto *ecd = dyn_cast<EnumConstantDecl>(dre->getDecl())) {
         const auto val = ecd->getInitVal();
