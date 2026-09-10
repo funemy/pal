@@ -33,6 +33,11 @@ Ref<rust::Str> toStr(llvm::StringRef const &str) {
   return str_from_parts((uint8_t const *)str.data(), str.size());
 }
 
+// Parse-error cascade tracking (the tool is single-threaded; both counters
+// are reset at the start of each parse_file run). See reportUnsupported.
+static unsigned numClangParseErrors = 0;
+static unsigned numSuppressedUnsupported = 0;
+
 Ref<rust::Str> toStr(std::string const &str) {
   return str_from_parts((uint8_t const *)str.data(), str.size());
 }
@@ -245,6 +250,14 @@ public:
                          char const *msg, T const &extra) {
     if (!sm.isInMainFile(sm.getExpansionLoc(rng.getBegin()))) {
       // only complain about unsupported syntax in main file
+      return;
+    }
+    // Once clang has reported a parse error the AST contains error-recovery
+    // nodes (RecoveryExpr, dependent types); "unsupported construct" errors
+    // on such an AST are cascade noise, so hold them back and let
+    // parse_file() emit one summary instead.
+    if (numClangParseErrors > 0) {
+      numSuppressedUnsupported++;
       return;
     }
     ctx.report_diag(loc.clone(), true, toStr(std::string(msg) + extra));
@@ -3063,6 +3076,8 @@ public:
 
   void HandleDiagnostic(DiagnosticsEngine::Level DiagLevel,
                         const Diagnostic &Info) override {
+    if (DiagLevel >= DiagnosticsEngine::Level::Error)
+      numClangParseErrors++;
     if (!Info.hasSourceManager())
       return;
     auto &sm = Info.getSourceManager();
@@ -3228,6 +3243,9 @@ static void parse_file(RefMut<Ctx> ctx) {
   std::string fileName = toString(ctx.get_input_file_name());
   std::vector<std::string> sourcePathList{fileName};
 
+  numClangParseErrors = 0;
+  numSuppressedUnsupported = 0;
+
   std::string compDBErrMsg;
   auto compDB =
       CompilationDatabase::autoDetectFromSource(fileName, compDBErrMsg);
@@ -3260,6 +3278,17 @@ static void parse_file(RefMut<Ctx> ctx) {
 
   PALActionFactory factory(ctx, rangeMap);
   Tool.run(&factory);
+
+  if (numSuppressedUnsupported > 0) {
+    std::string msg =
+        std::to_string(numSuppressedUnsupported) +
+        " unsupported-construct diagnostic(s) suppressed because the C "
+        "parse already failed; fix the C errors above (usually missing "
+        "headers or type definitions) and re-run";
+    ctx.report_diag(
+        mk_original_location(ctx.intern_str(toStr(fileName)), 1, 1, 1, 1),
+        false, toStr(msg));
+  }
 }
 
 namespace rust::exported_functions {
