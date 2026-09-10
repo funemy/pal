@@ -727,10 +727,10 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn hoist_cell_borrow(&mut self, env: &Env, arr: &Expr, idx: &Expr) -> Doc {
+    fn hoist_cell_borrow(&mut self, env: &Env, cb: &CellBorrow) -> Doc {
         let tmp = self.fresh_tmp("borrow");
-        let arr_doc = self.emit_array_base(env, arr);
-        let idx_doc = self.emit_rvalue(env, idx);
+        let arr_doc = self.emit_array_base(env, &cb.arr);
+        let idx_doc = self.emit_rvalue(env, &cb.idx);
         let binding = Doc::text("let ")
             .append(tmp.clone())
             .append(Doc::text(" ="))
@@ -740,7 +740,15 @@ impl<'a> Emitter<'a> {
             .nest(2)
             .group();
         self.hoisted.push(binding);
-        tmp
+        match &cb.field {
+            // `&a[i].f`: the field projected out of the borrowed cell, exactly
+            // as `p->f` is projected out of any struct `ref`.
+            Some((struct_name, field)) => parens(unaryfn(
+                self.emit_name(Name::StructFieldProj(struct_name.clone(), field.clone())),
+                tmp,
+            )),
+            None => tmp,
+        }
     }
 
     /// Emit a Name with full module qualification when it refers to a different module.
@@ -2394,21 +2402,59 @@ fn borrowable_array_base(env: &Env, arr: &Expr) -> bool {
         })
 }
 
-/// `&a[i]` passed where the callee expects a plain `ref` (`T *`) and `a` is a
-/// real `_array`: the argument is cell `i` borrowed out of the array with
-/// `array_borrow_cell` (see `Pulse.Lib.C.Array`). Returns the array and index
-/// expressions when argument `i` of a call to `fn_decl` has that shape, and
-/// `None` for every other argument, which is emitted as an ordinary rvalue.
-fn cell_borrow_arg(
-    env: &Env,
-    fn_decl: &FnDecl,
-    i: usize,
-    arg: &Expr,
-) -> Option<(Rc<Expr>, Rc<Expr>)> {
+/// What `&a[i]` or `&a[i].f` denotes: cell `i` of the array `a`, borrowed out
+/// of it with `array_borrow_cell`, and for `&a[i].f` the field `f` projected
+/// out of the borrowed cell (named by its struct and field).
+struct CellBorrow {
+    arr: Rc<Expr>,
+    idx: Rc<Expr>,
+    field: Option<(Rc<str>, Rc<str>)>,
+}
+
+/// The cell borrow denoted by `target`, the operand of an address-of: `a[i]`
+/// with `a` a borrowable array (see `borrowable_array_base`), or `a[i].f` with
+/// the element a struct and `f` a scalar field of it. An inline array field
+/// is an array handle rather than a cell and is not handled here.
+fn cell_borrow_target(env: &Env, target: &Expr) -> Option<CellBorrow> {
+    match &target.val {
+        ExprT::Index(arr, idx) if borrowable_array_base(env, arr) => Some(CellBorrow {
+            arr: arr.clone(),
+            idx: idx.clone(),
+            field: None,
+        }),
+        ExprT::Member(base, fld) => {
+            let ExprT::Index(arr, idx) = &base.val else {
+                return None;
+            };
+            if !borrowable_array_base(env, arr) {
+                return None;
+            }
+            let base_ty = env.vtype_whnf(env.infer_expr(base).ok()?);
+            let TypeT::TypeRef(TypeRefKind::Struct(struct_name)) = &base_ty.val else {
+                return None;
+            };
+            let is_inline_array = env
+                .lookup_struct(struct_name)
+                .and_then(|s| s.fields.iter().find(|f| f.val.name().val == fld.val))
+                .map(|f| f.val.is_array())
+                .unwrap_or(false);
+            (!is_inline_array).then(|| CellBorrow {
+                arr: arr.clone(),
+                idx: idx.clone(),
+                field: Some((struct_name.val.clone(), fld.val.clone())),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// `&a[i]` (or `&a[i].f`) passed where the callee expects a plain `ref`
+/// (`T *`): the argument is the cell borrowed out of the array (see
+/// `cell_borrow_target`). Returns the borrow when argument `i` of a call to
+/// `fn_decl` has that shape, and `None` for every other argument, which is
+/// emitted as an ordinary rvalue.
+fn cell_borrow_arg(env: &Env, fn_decl: &FnDecl, i: usize, arg: &Expr) -> Option<CellBorrow> {
     let ExprT::Ref(inner) = &arg.val else {
-        return None;
-    };
-    let ExprT::Index(arr, idx) = &inner.val else {
         return None;
     };
     let param_is_ref = fn_decl.args.get(i).is_some_and(|fn_arg| {
@@ -2417,7 +2463,10 @@ fn cell_borrow_arg(
             TypeT::Pointer(_, PointerKind::Ref)
         )
     });
-    (param_is_ref && borrowable_array_base(env, arr)).then(|| (arr.clone(), idx.clone()))
+    if !param_is_ref {
+        return None;
+    }
+    cell_borrow_target(env, inner)
 }
 
 fn emit_binop(env: &Env, op: BinOp, ty: MaybeRc<Type>) -> Option<Doc> {
@@ -3393,8 +3442,8 @@ impl<'a> Emitter<'a> {
                         Doc::intersperse(
                             args.iter().enumerate().map(|(i, arg)| {
                                 match fn_decl.and_then(|d| cell_borrow_arg(env, d, i, arg)) {
-                                    Some((arr, idx)) if self.stmt_depth > 0 => {
-                                        self.hoist_cell_borrow(env, &arr, &idx)
+                                    Some(cb) if self.stmt_depth > 0 => {
+                                        self.hoist_cell_borrow(env, &cb)
                                     }
                                     _ => self.emit_rvalue(env, arg),
                                 }
@@ -4007,8 +4056,8 @@ impl<'a> Emitter<'a> {
                                 }
                                 _ => None,
                             };
-                            if let Some((arr, idx)) = borrow_cell {
-                                let tmp = self.hoist_cell_borrow(env, &arr, &idx);
+                            if let Some(cb) = borrow_cell {
+                                let tmp = self.hoist_cell_borrow(env, &cb);
                                 emitted_args.push(tmp);
                                 args_rewritten = true;
                             } else if let Some((elem_ty, spec_arg, is_static)) = array_init
@@ -4246,23 +4295,31 @@ impl<'a> Emitter<'a> {
                     // the array with `array_return_cell`. The borrow call is
                     // stored directly into the (mutable) `ref` local `x`.
                     if let ExprT::Ref(inner) = &t.val
-                        && let ExprT::Index(arr, idx) = &inner.val
-                        && borrowable_array_base(env, arr)
+                        && let Some(cb) = cell_borrow_target(env, inner)
                         && env
                             .infer_expr(x)
                             .ok()
                             .map(|ty| env.vtype_whnf(ty))
                             .is_some_and(|ty| matches!(ty.val, TypeT::Pointer(_, PointerKind::Ref)))
                     {
-                        let arr_doc = self.emit_array_base(env, arr);
-                        let idx_doc = self.emit_rvalue(env, idx);
+                        // `x = &a[i].f`: the borrow is hoisted before the
+                        // statement and the projection stored, as for a call
+                        // argument; the plain `x = &a[i]` keeps storing the
+                        // borrow directly.
+                        let rhs = if cb.field.is_some() {
+                            self.hoist_cell_borrow(env, &cb)
+                        } else {
+                            let arr_doc = self.emit_array_base(env, &cb.arr);
+                            let idx_doc = self.emit_rvalue(env, &cb.idx);
+                            naryfn([Doc::text("array_borrow_cell"), arr_doc, idx_doc])
+                        };
                         return self
                             .emit_lvalue(env, x)
                             .append(Doc::line())
                             .append(":=")
                             .group()
                             .append(Doc::line())
-                            .append(naryfn([Doc::text("array_borrow_cell"), arr_doc, idx_doc]))
+                            .append(rhs)
                             .append(";")
                             .group()
                             .nest(2);
