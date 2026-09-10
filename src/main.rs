@@ -244,6 +244,10 @@ fn main() {
         return;
     }
 
+    // Collect the assumptions the verification will rest on (decl-only
+    // functions, opaque types) so missing definitions/specs are explicit.
+    let assumptions = pass::report::collect(&combined_tu);
+
     // Emit per-declaration modules
     let t = Instant::now();
     let modules = pass::emit::emit_multifile(&mut diags, &combined_tu);
@@ -299,6 +303,12 @@ fn main() {
         // Write diagnostics
         std::fs::write(outdir.join("diagnostics.json"), &serialize_diags(&diags)).unwrap();
 
+        // Write the assumptions report (missing definitions/specifications)
+        write_if_changed(
+            &outdir.join("assumptions.md"),
+            assumptions.to_markdown().as_bytes(),
+        );
+
         // Remove stale .fst/.fsti files from previous runs
         if let Ok(entries) = std::fs::read_dir(&outdir) {
             for entry in entries.flatten() {
@@ -316,6 +326,12 @@ fn main() {
 
     if !cli.quiet {
         diags.print_to_stderr(&mut *vfs);
+        if !assumptions.is_empty() {
+            eprint!("{}", assumptions.to_stderr_summary());
+            if cli.outdir.is_some() {
+                eprintln!("      (details in <outdir>/assumptions.md)");
+            }
+        }
     }
     if diags.has_errors() {
         std::process::exit(0)

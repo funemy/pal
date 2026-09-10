@@ -6,4 +6,5 @@ pub mod emit;
 pub mod merge;
 pub mod normalize_casts;
 pub mod prune;
+pub mod report;
 pub mod restructure_goto;
