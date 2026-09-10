@@ -1637,9 +1637,40 @@ public:
         }
         auto fn = ctx.mk_ident(toStr(fd->getName()),
                                getRange(c->getCallee()->getSourceRange()));
+        // A variadic callee (`int f(int n, ...)`): the prototype's fixed
+        // parameters are all the Pulse signature has, so only the arguments
+        // bound to them are translated. The trailing arguments are dropped
+        // with a warning when that loses nothing but their values (a format
+        // string's operands); one with a side effect cannot be dropped and
+        // the call is reported as unsupported.
+        unsigned nArgs = c->getNumArgs();
+        if (fd->isVariadic() && nArgs > fd->getNumParams()) {
+          unsigned nFixed = fd->getNumParams();
+          for (unsigned i = nFixed; i < nArgs; ++i) {
+            if (c->getArg(i)->HasSideEffects(*astCtx)) {
+              reportUnsupported(e->getSourceRange(), loc,
+                                "a variadic argument with a side effect in a "
+                                "call to ",
+                                fd->getName().str());
+              return mk_rvalue_err(
+                  std::move(loc),
+                  trQualType(c->getType(), c->getSourceRange()));
+            }
+          }
+          if (sm.isInMainFile(
+                  sm.getExpansionLoc(e->getSourceRange().getBegin()))) {
+            ctx.report_diag(loc.clone(), false,
+                            toStr(std::to_string(nArgs - nFixed) +
+                                  " variadic argument(s) in the call to " +
+                                  fd->getName().str() +
+                                  " dropped: only the fixed parameters of a "
+                                  "variadic function are modeled"));
+          }
+          nArgs = nFixed;
+        }
         auto args = Vec<Rc<ir::Expr>>::new_();
-        for (auto arg : c->arguments()) {
-          args.push(trRValue(arg));
+        for (unsigned i = 0; i < nArgs; ++i) {
+          args.push(trRValue(c->getArg(i)));
         }
         return mk_rvalue_fncall(std::move(loc), std::move(fn), std::move(args));
       } else {
