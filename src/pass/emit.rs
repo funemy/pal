@@ -687,6 +687,14 @@ struct Emitter<'a> {
     /// body) vs `call_div` (divergent body).
     current_fn_total: bool,
     tmp_counter: usize,
+    /// `let` bindings hoisted out of the statement being emitted -- a cell
+    /// borrowed for a call argument in expression position -- which
+    /// `emit_stmt` places right before that statement. See
+    /// `hoist_cell_borrow`.
+    hoisted: Vec<Doc>,
+    /// Nesting depth of `emit_stmt`: hoisting is only possible while a
+    /// statement is being emitted, not inside a contract.
+    stmt_depth: usize,
 }
 
 impl<'a> Emitter<'a> {
@@ -701,6 +709,27 @@ impl<'a> Emitter<'a> {
     fn fresh_tmp(&mut self, prefix: &str) -> Doc {
         let tmp = Doc::text(format!("__pal_{}_{}", prefix, self.tmp_counter));
         self.tmp_counter += 1;
+        tmp
+    }
+
+    /// Borrow cell `idx` of the `_array` `arr` with `array_borrow_cell`, bound
+    /// to a fresh name by a `let` that `emit_stmt` places before the statement
+    /// currently being emitted, and return that name. Used for a `&a[i]`
+    /// argument bound for a plain-`ref` parameter (see `cell_borrow_arg`),
+    /// whether the call is a statement or sits in expression position.
+    fn hoist_cell_borrow(&mut self, env: &Env, arr: &Expr, idx: &Expr) -> Doc {
+        let tmp = self.fresh_tmp("borrow");
+        let arr_doc = self.emit_rvalue(env, arr);
+        let idx_doc = self.emit_rvalue(env, idx);
+        let binding = Doc::text("let ")
+            .append(tmp.clone())
+            .append(Doc::text(" ="))
+            .append(Doc::line())
+            .append(naryfn([Doc::text("array_borrow_cell"), arr_doc, idx_doc]))
+            .append(";")
+            .nest(2)
+            .group();
+        self.hoisted.push(binding);
         tmp
     }
 
@@ -2338,6 +2367,37 @@ fn emit_unop(env: &Env, op: UnOp, ty: MaybeRc<Type>) -> Option<Doc> {
     })
 }
 
+/// `&a[i]` passed where the callee expects a plain `ref` (`T *`) and `a` is a
+/// real `_array`: the argument is cell `i` borrowed out of the array with
+/// `array_borrow_cell` (see `Pulse.Lib.C.Array`). Returns the array and index
+/// expressions when argument `i` of a call to `fn_decl` has that shape, and
+/// `None` for every other argument, which is emitted as an ordinary rvalue.
+fn cell_borrow_arg(
+    env: &Env,
+    fn_decl: &FnDecl,
+    i: usize,
+    arg: &Expr,
+) -> Option<(Rc<Expr>, Rc<Expr>)> {
+    let ExprT::Ref(inner) = &arg.val else {
+        return None;
+    };
+    let ExprT::Index(arr, idx) = &inner.val else {
+        return None;
+    };
+    let param_is_ref = fn_decl.args.get(i).is_some_and(|fn_arg| {
+        matches!(
+            env.vtype_whnf(fn_arg.ty.clone().into()).val,
+            TypeT::Pointer(_, PointerKind::Ref)
+        )
+    });
+    let arr_is_array = env
+        .infer_expr(arr)
+        .ok()
+        .map(|t| env.vtype_whnf(t))
+        .is_some_and(|t| matches!(&t.val, TypeT::Pointer(_, PointerKind::Array)));
+    (param_is_ref && arr_is_array).then(|| (arr.clone(), idx.clone()))
+}
+
 fn emit_binop(env: &Env, op: BinOp, ty: MaybeRc<Type>) -> Option<Doc> {
     Some(match (op, &env.vtype_whnf(ty).val) {
         (BinOp::Eq, TypeT::SLProp | TypeT::Void) => Doc::text("=="),
@@ -3291,11 +3351,32 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 ExprT::FnCall(f, args) => {
+                    // A call in expression position: an assignment's right-hand
+                    // side, an `if` condition, an operand of `&&`. A `&a[i]`
+                    // argument bound for a plain-`ref` parameter is borrowed out
+                    // of the array into a `let` hoisted before the enclosing
+                    // statement (`hoist_cell_borrow`), exactly as the statement
+                    // form does. Emitting the borrow inline as
+                    // `f (array_borrow_cell a i)` does not work: nested inside an
+                    // argument, Pulse elaborates the borrow against the array
+                    // twice, and the second `array_spec_mask` obligation fails.
+                    // Outside a statement (in a contract) there is nowhere to
+                    // hoist to, so the argument is left an ordinary rvalue. As
+                    // in the statement form the cell is lent one way only; the
+                    // user returns it with `array_return_cell`.
+                    let fn_decl = env.lookup_fn(f);
                     let args = if args.is_empty() {
                         Doc::text("()")
                     } else {
                         Doc::intersperse(
-                            args.iter().map(|arg| self.emit_rvalue(env, arg)),
+                            args.iter().enumerate().map(|(i, arg)| {
+                                match fn_decl.and_then(|d| cell_borrow_arg(env, d, i, arg)) {
+                                    Some((arr, idx)) if self.stmt_depth > 0 => {
+                                        self.hoist_cell_borrow(env, &arr, &idx)
+                                    }
+                                    _ => self.emit_rvalue(env, arg),
+                                }
+                            }),
                             Doc::line(),
                         )
                     };
@@ -3811,6 +3892,23 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_stmt(&mut self, env: &Env, stmt: &Stmt) -> Doc {
+        // Bindings hoisted while emitting this statement (`hoist_cell_borrow`)
+        // go right before it. An enclosing statement's own hoisted bindings --
+        // an `if` whose condition borrowed a cell, while its branches are
+        // emitted -- are set aside meanwhile and restored afterwards.
+        let outer = std::mem::take(&mut self.hoisted);
+        self.stmt_depth += 1;
+        let doc = self.emit_stmt_inner(env, stmt);
+        self.stmt_depth -= 1;
+        let hoisted = std::mem::replace(&mut self.hoisted, outer);
+        if hoisted.is_empty() {
+            doc
+        } else {
+            Doc::concat(hoisted.into_iter().map(|b| b.append(Doc::hardline()))).append(doc)
+        }
+    }
+
+    fn emit_stmt_inner(&mut self, env: &Env, stmt: &Stmt) -> Doc {
         annotated(stmt, || {
             match &stmt.val {
                 StmtT::Call(v) => {
@@ -3831,6 +3929,10 @@ impl<'a> Emitter<'a> {
                     {
                         let mut prelude = Vec::new();
                         let mut emitted_args = Vec::new();
+                        // Set when an argument was rewritten (a hoisted cell
+                        // borrow), which makes the generic rvalue emission of the
+                        // call below wrong: it would rewrite -- and borrow -- again.
+                        let mut args_rewritten = false;
                         for (i, arg) in args.iter().enumerate() {
                             let callee_expects_array = fn_decl.args.get(i).is_some_and(|fn_arg| {
                                 matches!(
@@ -3841,11 +3943,11 @@ impl<'a> Emitter<'a> {
                             // `&a[i]` passed into a plain `int *` param (a Pulse
                             // `ref`) where `a` is a real `_array`: borrow cell `i`
                             // out of the array with `array_borrow_cell`. The
-                            // borrow is emitted as a call prelude and the fresh
-                            // binding passed in place of the address-of
-                            // expression. (The name is not strictly required --
-                            // an inline `f (array_borrow_cell a i)` would be
-                            // A-normalized by Pulse to the same binding.) The
+                            // borrow is hoisted into a `let` before the statement
+                            // (`hoist_cell_borrow`) and the fresh binding passed in
+                            // place of the address-of expression; a call in
+                            // expression position gets the same treatment in
+                            // `emit_expr`. The
                             // returning side is invoked manually by the user via
                             // inline Pulse.
                             //
@@ -3866,36 +3968,7 @@ impl<'a> Emitter<'a> {
                             // the cell back explicitly (`intro_maybe_some` + the
                             // index-inferring `array_return_cell`); the direct
                             // `f(&a[i])` form carries the borrow one way only.
-                            let borrow_cell = match &arg.val {
-                                ExprT::Ref(inner) => match &inner.val {
-                                    ExprT::Index(arr, idx) => {
-                                        let param = fn_decl.args.get(i);
-                                        let param_is_ref = param.is_some_and(|fn_arg| {
-                                            matches!(
-                                                env.vtype_whnf(fn_arg.ty.clone().into()).val,
-                                                TypeT::Pointer(_, PointerKind::Ref)
-                                            )
-                                        });
-                                        let arr_is_array = env
-                                            .infer_expr(arr)
-                                            .ok()
-                                            .map(|t| env.vtype_whnf(t))
-                                            .is_some_and(|t| {
-                                                matches!(
-                                                    &t.val,
-                                                    TypeT::Pointer(_, PointerKind::Array)
-                                                )
-                                            });
-                                        if param_is_ref && arr_is_array {
-                                            Some((arr.clone(), idx.clone()))
-                                        } else {
-                                            None
-                                        }
-                                    }
-                                    _ => None,
-                                },
-                                _ => None,
-                            };
+                            let borrow_cell = cell_borrow_arg(env, fn_decl, i, arg);
                             let array_init = match &arg.val {
                                 ExprT::ArrayInit {
                                     elem_ty, is_static, ..
@@ -3913,23 +3986,9 @@ impl<'a> Emitter<'a> {
                                 _ => None,
                             };
                             if let Some((arr, idx)) = borrow_cell {
-                                let tmp = self.fresh_tmp("borrow");
-                                let arr_doc = self.emit_rvalue(env, &arr);
-                                let idx_doc = self.emit_rvalue(env, &idx);
-                                let borrow = Doc::text("let ")
-                                    .append(tmp.clone())
-                                    .append(Doc::text(" ="))
-                                    .append(Doc::line())
-                                    .append(naryfn([
-                                        Doc::text("array_borrow_cell"),
-                                        arr_doc,
-                                        idx_doc,
-                                    ]))
-                                    .append(";")
-                                    .nest(2)
-                                    .group();
-                                prelude.push(borrow);
+                                let tmp = self.hoist_cell_borrow(env, &arr, &idx);
                                 emitted_args.push(tmp);
+                                args_rewritten = true;
                             } else if let Some((elem_ty, spec_arg, is_static)) = array_init
                                 && (callee_expects_array || !is_static)
                             {
@@ -3973,7 +4032,7 @@ impl<'a> Emitter<'a> {
                                 emitted_args.push(self.emit_rvalue(env, arg));
                             }
                         }
-                        if !prelude.is_empty() {
+                        if !prelude.is_empty() || args_rewritten {
                             let call_doc = Doc::concat(
                                 prelude.into_iter().map(|doc| doc.append(Doc::hardline())),
                             )
@@ -4502,8 +4561,21 @@ impl<'a> Emitter<'a> {
                     ensures,
                     body,
                 } => {
+                    // The condition runs on every iteration, so a cell borrowed
+                    // for a call inside it cannot be hoisted out of the loop.
+                    let hoisted_before = self.hoisted.len();
+                    let cond_doc = self.emit_rvalue(env, cond);
+                    if self.hoisted.len() > hoisted_before {
+                        self.hoisted.truncate(hoisted_before);
+                        self.report(
+                            "a `&a[i]` argument in a loop condition cannot be hoisted out of \
+                             the loop; bind the cell in the loop body instead"
+                                .to_string(),
+                            &cond.loc,
+                        );
+                    }
                     let head = Doc::text("while ")
-                        .append(parens(self.emit_rvalue(env, cond)))
+                        .append(parens(cond_doc))
                         .append(Doc::line())
                         .append(Doc::concat(inv.iter().map(|inv| {
                             Doc::text("invariant ")
@@ -8208,6 +8280,8 @@ pub fn emit_multifile(diags: &mut Diagnostics, tu: &TranslationUnit) -> Vec<Emit
         typedef_override_map,
         current_fn_total: false,
         tmp_counter: 0,
+        hoisted: Vec::new(),
+        stmt_depth: 0,
     };
 
     let addr_taken = collect_addr_taken(&tu.decls);
