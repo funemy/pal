@@ -265,6 +265,8 @@ pub enum BinOp {
     Lt,
     LogAnd,
     LogOr,
+    /// GNU `a ?: b`: `a` if it is nonzero, else `b`.
+    Elvis,
     Implies,
     Mul,
     Div,
@@ -286,6 +288,7 @@ impl BinOp {
             BinOp::Lt => "<",
             BinOp::LogAnd => "&&",
             BinOp::LogOr => "||",
+            BinOp::Elvis => "?:",
             BinOp::Implies => "==>",
             BinOp::Mul => "*",
             BinOp::Div => "/",

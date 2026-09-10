@@ -2435,6 +2435,21 @@ fn emit_binop(env: &Env, op: BinOp, ty: MaybeRc<Type>) -> Option<Doc> {
             Doc::text(format!("`{}.rem`", get_int_mod(signed, width)?))
         }
         (BinOp::Mod, TypeT::SizeT) => Doc::text("`SizeT.rem`"),
+        // GNU `a ?: b`, as a library function of the operands' type (see
+        // Pulse.Lib.C.Elvis): the first argument is `a`, evaluated once.
+        (BinOp::Elvis, TypeT::Int { signed, width }) => Doc::text(format!(
+            "`Pulse.Lib.C.Elvis.elvis_{}int{}`",
+            if *signed { "" } else { "u" },
+            width
+        )),
+        (BinOp::Elvis, TypeT::SizeT) => Doc::text("`Pulse.Lib.C.Elvis.elvis_size_t`"),
+        (BinOp::Elvis, TypeT::Bool) => Doc::text("||"),
+        (BinOp::Elvis, TypeT::Pointer(_, PointerKind::Ref | PointerKind::Unknown)) => {
+            Doc::text("`Pulse.Lib.C.Elvis.elvis_ref`")
+        }
+        // No library function for `?:` on any other type (floats, spec
+        // integers, array pointers): reported as an unsupported operator.
+        (BinOp::Elvis, _) => return None,
         (BinOp::Add, TypeT::Int { signed, width }) => {
             Doc::text(format!("`{}.add`", get_int_mod(signed, width)?))
         }

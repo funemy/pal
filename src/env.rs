@@ -498,6 +498,7 @@ impl Env {
             | ExprT::BinOp(
                 BinOp::LogAnd
                 | BinOp::LogOr
+                | BinOp::Elvis
                 | BinOp::Implies
                 | BinOp::Mul
                 | BinOp::Div
