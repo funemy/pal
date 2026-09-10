@@ -717,9 +717,19 @@ impl<'a> Emitter<'a> {
     /// currently being emitted, and return that name. Used for a `&a[i]`
     /// argument bound for a plain-`ref` parameter (see `cell_borrow_arg`),
     /// whether the call is a statement or sits in expression position.
+    /// The `array` value to borrow from. A fixed-size array field reached
+    /// through a live struct is an array lvalue holding the runtime handle;
+    /// an `_array` pointer is a plain rvalue. Same distinction as indexing.
+    fn emit_array_base(&mut self, env: &Env, arr: &Expr) -> Doc {
+        match self.emit_expr(env, arr) {
+            ExprKind::ArrayLValue(doc) => doc,
+            other => other.to_rvalue(),
+        }
+    }
+
     fn hoist_cell_borrow(&mut self, env: &Env, arr: &Expr, idx: &Expr) -> Doc {
         let tmp = self.fresh_tmp("borrow");
-        let arr_doc = self.emit_rvalue(env, arr);
+        let arr_doc = self.emit_array_base(env, arr);
         let idx_doc = self.emit_rvalue(env, idx);
         let binding = Doc::text("let ")
             .append(tmp.clone())
@@ -2367,6 +2377,23 @@ fn emit_unop(env: &Env, op: UnOp, ty: MaybeRc<Type>) -> Option<Doc> {
     })
 }
 
+/// Does `arr` denote an array whose cells can be borrowed with
+/// `array_borrow_cell`: an `_array` pointer, or a fixed-size array (`T a[N]`,
+/// typically a struct field accessed through a pointer to the struct, which
+/// is a live `array` handle just like an `_array` pointer is)? Both are
+/// `Pulse.Lib.C.Array.array` values in the emitted code.
+fn borrowable_array_base(env: &Env, arr: &Expr) -> bool {
+    env.infer_expr(arr)
+        .ok()
+        .map(|t| env.vtype_whnf(t))
+        .is_some_and(|t| {
+            matches!(
+                &t.val,
+                TypeT::Pointer(_, PointerKind::Array) | TypeT::FixedArray(_, _)
+            )
+        })
+}
+
 /// `&a[i]` passed where the callee expects a plain `ref` (`T *`) and `a` is a
 /// real `_array`: the argument is cell `i` borrowed out of the array with
 /// `array_borrow_cell` (see `Pulse.Lib.C.Array`). Returns the array and index
@@ -2390,12 +2417,7 @@ fn cell_borrow_arg(
             TypeT::Pointer(_, PointerKind::Ref)
         )
     });
-    let arr_is_array = env
-        .infer_expr(arr)
-        .ok()
-        .map(|t| env.vtype_whnf(t))
-        .is_some_and(|t| matches!(&t.val, TypeT::Pointer(_, PointerKind::Array)));
-    (param_is_ref && arr_is_array).then(|| (arr.clone(), idx.clone()))
+    (param_is_ref && borrowable_array_base(env, arr)).then(|| (arr.clone(), idx.clone()))
 }
 
 fn emit_binop(env: &Env, op: BinOp, ty: MaybeRc<Type>) -> Option<Doc> {
@@ -4212,7 +4234,8 @@ impl<'a> Emitter<'a> {
                     // that stored value. So fnptr stores fall through to the
                     // generic store below — no `intro`/`elim`/`copy` `valid_ptr`,
                     // no tracking.
-                    // `x = &a[i]` where `a` is an `_array` and `x` is a `ref`
+                    // `x = &a[i]` where `a` is an `_array` (or a fixed-size array
+                    // field, see `borrowable_array_base`) and `x` is a `ref`
                     // local: borrow cell `i` out of the array as a `ref` and
                     // bind it to `x`. This is the non-argument counterpart of
                     // the call-site cell borrow above: `array_borrow_cell` hands
@@ -4224,20 +4247,14 @@ impl<'a> Emitter<'a> {
                     // stored directly into the (mutable) `ref` local `x`.
                     if let ExprT::Ref(inner) = &t.val
                         && let ExprT::Index(arr, idx) = &inner.val
-                        && env
-                            .infer_expr(arr)
-                            .ok()
-                            .map(|ty| env.vtype_whnf(ty))
-                            .is_some_and(|ty| {
-                                matches!(ty.val, TypeT::Pointer(_, PointerKind::Array))
-                            })
+                        && borrowable_array_base(env, arr)
                         && env
                             .infer_expr(x)
                             .ok()
                             .map(|ty| env.vtype_whnf(ty))
                             .is_some_and(|ty| matches!(ty.val, TypeT::Pointer(_, PointerKind::Ref)))
                     {
-                        let arr_doc = self.emit_rvalue(env, arr);
+                        let arr_doc = self.emit_array_base(env, arr);
                         let idx_doc = self.emit_rvalue(env, idx);
                         return self
                             .emit_lvalue(env, x)
