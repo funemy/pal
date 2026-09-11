@@ -136,7 +136,24 @@ impl Diagnostics {
         let mut file_ids: HashMap<&'a str, usize> = HashMap::new();
         let writer = StandardStream::stderr(ColorChoice::Always);
         let config = codespan_reporting::term::Config::default();
+
+        // The same message at many sites (e.g. "unknown struct S" once per
+        // use when a header is missing) is shown at the first two sites and
+        // summarised afterwards; diagnostics.json keeps every occurrence.
+        const SHOWN_PER_MSG: usize = 2;
+        let mut totals: HashMap<&'a str, usize> = HashMap::new();
         for diag in &self.diags {
+            *totals.entry(diag.msg.as_str()).or_default() += 1;
+        }
+        let mut shown: HashMap<&'a str, usize> = HashMap::new();
+
+        for diag in &self.diags {
+            let key = diag.msg.as_str();
+            let seen = shown.entry(key).or_default();
+            *seen += 1;
+            if *seen > SHOWN_PER_MSG && totals[key] > SHOWN_PER_MSG + 1 {
+                continue;
+            }
             let mut d = if diag.level == DiagnosticLevel::Error {
                 Diagnostic::error()
             } else {
@@ -178,6 +195,19 @@ impl Diagnostics {
                 pos_to_byte(diag.loc.range.start)..(pos_to_byte(diag.loc.range.end) + 1),
             ));
             term::emit_to_io_write(&mut writer.lock(), &config, &files, &d).expect("printing diag");
+        }
+
+        let mut elided: Vec<(&str, usize)> = totals
+            .into_iter()
+            .filter(|(_, total)| *total > SHOWN_PER_MSG + 1)
+            .collect();
+        elided.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        for (key, total) in elided {
+            eprintln!(
+                "note: `{}` reported at {} more location(s); all occurrences are in diagnostics.json",
+                key,
+                total - SHOWN_PER_MSG
+            );
         }
     }
 }
