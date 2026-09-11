@@ -15,10 +15,16 @@ struct Checker<'a> {
 
 impl<'a> Checker<'a> {
     fn report(&mut self, msg: String, loc: &SourceInfo) {
+        self.report_with_detail(msg, None, loc);
+    }
+
+    fn report_with_detail(&mut self, msg: String, detail: Option<String>, loc: &SourceInfo) {
         self.diags.report(Diagnostic {
             loc: loc.location().clone(),
             level: DiagnosticLevel::Error,
-            msg: format!("(internal, after {}) {}", self.pass, msg),
+            msg,
+            pass: Some(self.pass.to_string()),
+            detail,
         });
     }
 
@@ -26,16 +32,23 @@ impl<'a> Checker<'a> {
         match env.infer_expr(rval) {
             Ok(ty) => Some(ty),
             Err(error) => {
-                self.report(
-                    format!("cannot infer type of {}: {}\n{}", rval, error, env),
-                    &rval.loc,
-                );
+                if !rval.contains_error() {
+                    self.report_with_detail(
+                        format!("cannot infer type of {}: {}", rval, error),
+                        Some(format!("{}", env)),
+                        &rval.loc,
+                    );
+                }
                 None
             }
         }
     }
 
     fn check_type_eq(&mut self, env: &Env, actual: MaybeRc<Type>, expected: MaybeRc<Type>) {
+        // An `Error` type is the residue of a reported failure.
+        if matches!(actual.val, TypeT::Error) || matches!(expected.val, TypeT::Error) {
+            return;
+        }
         if self.check_types && !env.vtype_eq(actual.clone(), expected.clone()) {
             self.report(
                 format!("expected type {} got {}", expected, actual),
@@ -45,6 +58,9 @@ impl<'a> Checker<'a> {
     }
 
     fn check_has_type(&mut self, env: &Env, rval: &Expr, expected: MaybeRc<Type>) {
+        if rval.contains_error() {
+            return;
+        }
         if self.check_types
             && let Some(ty) = self.infer_expr(env, rval)
             && !env.vtype_eq(ty.clone().into(), expected.clone())
@@ -210,6 +226,12 @@ impl<'a> Checker<'a> {
     }
 
     fn check_rvalue(&mut self, env: &Env, rval: &Expr) {
+        // An expression containing an `Error` node is the residue of a
+        // failure a translation phase has already reported; checking it
+        // would only report that failure again.
+        if rval.contains_error() {
+            return;
+        }
         match &rval.val {
             ExprT::BoolLit(_) => {}
             ExprT::IntLit(_n, ty) => {
@@ -588,6 +610,9 @@ impl<'a> Checker<'a> {
     }
 
     fn check_lvalue(&mut self, env: &Env, lval: &Expr) {
+        if lval.contains_error() {
+            return;
+        }
         self.check_rvalue(env, lval);
         if !env.is_lvalue(lval) {
             self.report(format!("expected lvalue, got {}", lval), &lval.loc);

@@ -12,6 +12,8 @@ fn report(diags: &mut Diagnostics, msg: String, loc: &SourceInfo) {
         loc: loc.location().clone(),
         level: DiagnosticLevel::Error,
         msg,
+        pass: None,
+        detail: None,
     });
 }
 

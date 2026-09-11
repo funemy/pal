@@ -691,10 +691,16 @@ struct Emitter<'a> {
 
 impl<'a> Emitter<'a> {
     fn report(&mut self, msg: String, loc: &SourceInfo) {
+        self.report_with_detail(msg, None, loc);
+    }
+
+    fn report_with_detail(&mut self, msg: String, detail: Option<String>, loc: &SourceInfo) {
         self.diags.report(Diagnostic {
             loc: loc.location().clone(),
             level: DiagnosticLevel::Error,
             msg,
+            pass: None,
+            detail,
         });
     }
 
@@ -867,67 +873,6 @@ fn eta_expand_doc(path: Doc, n: usize) -> Doc {
                 n - 1,
             )),
     )
-}
-
-/// Visit every sub-expression of `e`, outermost first.
-fn walk_expr_tree(e: &Expr, f: &mut impl FnMut(&Expr)) {
-    f(e);
-    match &e.val {
-        // Leaves.
-        ExprT::Var(_)
-        | ExprT::BoolLit(_)
-        | ExprT::IntLit(_, _)
-        | ExprT::FloatLit(_, _)
-        | ExprT::FnRef(_)
-        | ExprT::InlinePulse(_, _)
-        | ExprT::Malloc(_)
-        | ExprT::Calloc(_)
-        | ExprT::SizeOf(_)
-        | ExprT::AlignOf(_)
-        | ExprT::Error(_) => {}
-        // One sub-expression.
-        ExprT::Deref(a)
-        | ExprT::Member(a, _)
-        | ExprT::VAttr(_, a)
-        | ExprT::Ref(a)
-        | ExprT::UnOp(_, a)
-        | ExprT::Cast(a, _)
-        | ExprT::ContainerOf(a, _, _)
-        | ExprT::Live(a)
-        | ExprT::Old(a)
-        | ExprT::Forall(_, _, a)
-        | ExprT::Exists(_, _, a)
-        | ExprT::UnionInit(_, _, a)
-        | ExprT::MallocArray(_, a)
-        | ExprT::CallocArray(_, a)
-        | ExprT::MallocFlex(_, a)
-        | ExprT::CallocFlex(_, a)
-        | ExprT::MemsetZero(_, a)
-        | ExprT::Free(a)
-        | ExprT::PreIncr(a)
-        | ExprT::PostIncr(a)
-        | ExprT::PreDecr(a)
-        | ExprT::PostDecr(a) => walk_expr_tree(a, f),
-        // Two sub-expressions.
-        ExprT::Index(a, b) | ExprT::BinOp(_, a, b) | ExprT::AssignExpr(a, b) => {
-            walk_expr_tree(a, f);
-            walk_expr_tree(b, f);
-        }
-        // Three sub-expressions.
-        ExprT::Cond(a, b, c) | ExprT::Memset(_, a, b, c) => {
-            walk_expr_tree(a, f);
-            walk_expr_tree(b, f);
-            walk_expr_tree(c, f);
-        }
-        // Sequences.
-        ExprT::FnCall(_, args) => args.iter().for_each(|a| walk_expr_tree(a, f)),
-        ExprT::FnPtrCall(callee, args) => {
-            walk_expr_tree(callee, f);
-            args.iter().for_each(|a| walk_expr_tree(a, f));
-        }
-        ExprT::StructInit(_, fields) => fields.iter().for_each(|(_, a)| walk_expr_tree(a, f)),
-        ExprT::ArrayInit { elems, .. } => elems.iter().for_each(|a| walk_expr_tree(a, f)),
-    }
 }
 
 /// Visit every sub-expression appearing in `s`, including nested statements.
@@ -1947,7 +1892,9 @@ impl<'a> Emitter<'a> {
         match self.emit_expr(env, v) {
             ExprKind::LValue(doc) => doc,
             _ => {
-                self.report(format!("cannot produce lvalue for {}", v), &v.loc);
+                if !v.contains_error() {
+                    self.report(format!("cannot produce lvalue for {}", v), &v.loc);
+                }
                 Doc::text("(admit())")
             }
         }
@@ -2154,10 +2101,13 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 Err(error) => {
-                    self.report(
-                        format!("cannot infer type of {}: {}\n{}", x, error, env),
-                        &x.loc,
-                    );
+                    if !x.contains_error() {
+                        self.report_with_detail(
+                            format!("cannot infer type of {}: {}", x, error),
+                            Some(format!("{}", env)),
+                            &x.loc,
+                        );
+                    }
                     ExprKind::RValue(annotated(v, || Doc::text("(admit())")))
                 }
             },
@@ -2716,7 +2666,9 @@ impl<'a> Emitter<'a> {
                             if let Some(m) = get_float_mod(width) {
                                 unaryfn(Doc::text(format!("{}_of_bool", m)), val_doc)
                             } else {
-                                self.report(default_msg.clone(), &v.loc);
+                                if !v.contains_error() {
+                                    self.report(default_msg.clone(), &v.loc);
+                                }
                                 Doc::text("(admit())")
                             }
                         }
@@ -2747,7 +2699,9 @@ impl<'a> Emitter<'a> {
                                     Doc::text("int"),
                                 )
                             } else {
-                                self.report(default_msg.clone(), &v.loc);
+                                if !v.contains_error() {
+                                    self.report(default_msg.clone(), &v.loc);
+                                }
                                 Doc::text("(admit())")
                             }
                         }
@@ -2755,7 +2709,9 @@ impl<'a> Emitter<'a> {
                             if let Some(m) = get_float_mod(width) {
                                 unaryfn(Doc::text(format!("{}_to_bool", m)), val_doc)
                             } else {
-                                self.report(default_msg.clone(), &v.loc);
+                                if !v.contains_error() {
+                                    self.report(default_msg.clone(), &v.loc);
+                                }
                                 Doc::text("(admit())")
                             }
                         }
@@ -2779,7 +2735,9 @@ impl<'a> Emitter<'a> {
                                     val_doc.append(Doc::text(")")),
                                 )
                             } else {
-                                self.report(default_msg.clone(), &v.loc);
+                                if !v.contains_error() {
+                                    self.report(default_msg.clone(), &v.loc);
+                                }
                                 Doc::text("(admit())")
                             }
                         }
@@ -2797,7 +2755,9 @@ impl<'a> Emitter<'a> {
                                     val_doc.append(Doc::text(")")),
                                 )
                             } else {
-                                self.report(default_msg.clone(), &v.loc);
+                                if !v.contains_error() {
+                                    self.report(default_msg.clone(), &v.loc);
+                                }
                                 Doc::text("(admit())")
                             }
                         }
@@ -2863,7 +2823,9 @@ impl<'a> Emitter<'a> {
                                     self.emit_type(env, &*to_ty),
                                 )
                             } else {
-                                self.report(default_msg.clone(), &v.loc);
+                                if !v.contains_error() {
+                                    self.report(default_msg.clone(), &v.loc);
+                                }
                                 Doc::text("(admit())")
                             }
                         }
@@ -2874,7 +2836,9 @@ impl<'a> Emitter<'a> {
                                     val_doc.append(Doc::text(")")),
                                 )
                             } else {
-                                self.report(default_msg.clone(), &v.loc);
+                                if !v.contains_error() {
+                                    self.report(default_msg.clone(), &v.loc);
+                                }
                                 Doc::text("(admit())")
                             }
                         }
@@ -2892,7 +2856,9 @@ impl<'a> Emitter<'a> {
                                     val_doc,
                                 )
                             } else {
-                                self.report(default_msg.clone(), &v.loc);
+                                if !v.contains_error() {
+                                    self.report(default_msg.clone(), &v.loc);
+                                }
                                 Doc::text("(admit())")
                             }
                         }
@@ -2960,7 +2926,9 @@ impl<'a> Emitter<'a> {
                                     val_doc.append(Doc::text(")")),
                                 )
                             } else {
-                                self.report(default_msg.clone(), &v.loc);
+                                if !v.contains_error() {
+                                    self.report(default_msg.clone(), &v.loc);
+                                }
                                 Doc::text("(admit())")
                             }
                         }
@@ -2971,7 +2939,9 @@ impl<'a> Emitter<'a> {
                                     val_doc.append(Doc::text(")")),
                                 )
                             } else {
-                                self.report(default_msg.clone(), &v.loc);
+                                if !v.contains_error() {
+                                    self.report(default_msg.clone(), &v.loc);
+                                }
                                 Doc::text("(admit())")
                             }
                         }
@@ -2982,7 +2952,9 @@ impl<'a> Emitter<'a> {
                                     val_doc.append(Doc::text(")")),
                                 )
                             } else {
-                                self.report(default_msg.clone(), &v.loc);
+                                if !v.contains_error() {
+                                    self.report(default_msg.clone(), &v.loc);
+                                }
                                 Doc::text("(admit())")
                             }
                         }
@@ -2997,7 +2969,9 @@ impl<'a> Emitter<'a> {
                                     val_doc.append(Doc::text(")")),
                                 )
                             } else {
-                                self.report(default_msg.clone(), &v.loc);
+                                if !v.contains_error() {
+                                    self.report(default_msg.clone(), &v.loc);
+                                }
                                 Doc::text("(admit())")
                             }
                         }
@@ -3009,7 +2983,9 @@ impl<'a> Emitter<'a> {
                                     val_doc.append(Doc::text(")")),
                                 )
                             } else {
-                                self.report(default_msg.clone(), &v.loc);
+                                if !v.contains_error() {
+                                    self.report(default_msg.clone(), &v.loc);
+                                }
                                 Doc::text("(admit())")
                             }
                         }
@@ -3020,7 +2996,9 @@ impl<'a> Emitter<'a> {
                                     val_doc.append(Doc::text(")")),
                                 )
                             } else {
-                                self.report(default_msg.clone(), &v.loc);
+                                if !v.contains_error() {
+                                    self.report(default_msg.clone(), &v.loc);
+                                }
                                 Doc::text("(admit())")
                             }
                         }
@@ -3286,7 +3264,9 @@ impl<'a> Emitter<'a> {
                     {
                         binop(self.emit_rvalue(env, lhs), op, self.emit_rvalue(env, rhs))
                     } else {
-                        self.report(format!("unsupported binary operator on {}", lhs), &v.loc);
+                        if !v.contains_error() {
+                            self.report(format!("unsupported binary operator on {}", lhs), &v.loc);
+                        }
                         Doc::text("(admit())")
                     }
                 }

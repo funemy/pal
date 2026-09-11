@@ -962,6 +962,8 @@ fn expr_parser<
                                 level: DiagnosticLevel::Error,
                                 msg: "compound literals are only supported for struct types"
                                     .to_string(),
+                                pass: None,
+                                detail: None,
                             });
                             ExprT::Error(TypeT::Error.with_loc(loc.clone())).with_loc(loc).into()
                         }
@@ -1186,6 +1188,8 @@ fn relex_inline_code<'a>(diagnostics: &mut Diagnostics, code: &'a InlineCode) ->
                         loc: loc.location().clone(),
                         level: DiagnosticLevel::Error,
                         msg: format!("{}", err),
+                        pass: None,
+                        detail: None,
                     }));
                 tokens.push((
                     *result.output().unwrap_or(&Token::Error),
@@ -1199,6 +1203,8 @@ fn relex_inline_code<'a>(diagnostics: &mut Diagnostics, code: &'a InlineCode) ->
                         loc: loc.location().clone(),
                         level: DiagnosticLevel::Error,
                         msg: format!("{}", err),
+                        pass: None,
+                        detail: None,
                     }));
                 tokens.push((
                     *result.output().unwrap_or(&Token::Error),
@@ -1215,6 +1221,8 @@ fn relex_inline_code<'a>(diagnostics: &mut Diagnostics, code: &'a InlineCode) ->
                     loc: loc.location().clone(),
                     level: DiagnosticLevel::Error,
                     msg: format!("{}", err),
+                    pass: None,
+                    detail: None,
                 }));
             tokens.push((
                 *result.output().unwrap_or(&Token::Error),
@@ -1229,6 +1237,8 @@ fn relex_inline_code<'a>(diagnostics: &mut Diagnostics, code: &'a InlineCode) ->
                     loc: loc.location().clone(),
                     level: DiagnosticLevel::Error,
                     msg: format!("{}", err),
+                    pass: None,
+                    detail: None,
                 }));
             tokens.push((
                 *result.output().unwrap_or(&Token::Error),
@@ -1276,6 +1286,8 @@ pub fn parse_expr(
             loc: source_infos.resolve_error_location(err.span()),
             level: DiagnosticLevel::Error,
             msg: format!("{}", err),
+            pass: None,
+            detail: None,
         })
         .collect();
     drop(result);
@@ -1311,6 +1323,8 @@ fn parse_type_inner(
                     loc: source_infos.resolve_error_location(err.span()),
                     level: DiagnosticLevel::Error,
                     msg: format!("{}", err),
+                    pass: None,
+                    detail: None,
                 }));
             TypeT::Error.with_loc(fallback_loc.clone())
         }
@@ -1339,6 +1353,8 @@ pub fn parse_type_name(
         loc: fallback_loc.location().clone(),
         level: DiagnosticLevel::Error,
         msg: "in _type: expected a single identifier as type name".into(),
+        pass: None,
+        detail: None,
     });
     None
 }
@@ -1383,6 +1399,8 @@ pub fn parse_ghost_arg_binding(
                     loc: source_infos.resolve_error_location(err.span()),
                     level: DiagnosticLevel::Error,
                     msg: format!("in _ghost_arg: {}", err),
+                    pass: None,
+                    detail: None,
                 }));
             None
         }
@@ -1424,6 +1442,8 @@ pub fn parse_refine_value_binding(
         loc: fallback_loc.location().clone(),
         level: DiagnosticLevel::Error,
         msg: "in _refine_value: expected `type_name binding_name`".into(),
+        pass: None,
+        detail: None,
     });
     None
 }
@@ -1464,6 +1484,8 @@ pub fn parse_let_signature(
                     loc: source_infos.resolve_error_location(err.span()),
                     level: DiagnosticLevel::Error,
                     msg: format!("in _let signature: {}", err),
+                    pass: None,
+                    detail: None,
                 }));
             None
         }

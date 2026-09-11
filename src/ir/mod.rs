@@ -828,3 +828,75 @@ pub struct TranslationUnit {
     pub main_file_names: Vec<Rc<str>>,
     pub decls: Vec<Decl>,
 }
+
+/// Visit every sub-expression of `e`, outermost first.
+pub fn walk_expr_tree(e: &Expr, f: &mut impl FnMut(&Expr)) {
+    f(e);
+    match &e.val {
+        // Leaves.
+        ExprT::Var(_)
+        | ExprT::BoolLit(_)
+        | ExprT::IntLit(_, _)
+        | ExprT::FloatLit(_, _)
+        | ExprT::FnRef(_)
+        | ExprT::InlinePulse(_, _)
+        | ExprT::Malloc(_)
+        | ExprT::Calloc(_)
+        | ExprT::SizeOf(_)
+        | ExprT::AlignOf(_)
+        | ExprT::Error(_) => {}
+        // One sub-expression.
+        ExprT::Deref(a)
+        | ExprT::Member(a, _)
+        | ExprT::VAttr(_, a)
+        | ExprT::Ref(a)
+        | ExprT::UnOp(_, a)
+        | ExprT::Cast(a, _)
+        | ExprT::ContainerOf(a, _, _)
+        | ExprT::Live(a)
+        | ExprT::Old(a)
+        | ExprT::Forall(_, _, a)
+        | ExprT::Exists(_, _, a)
+        | ExprT::UnionInit(_, _, a)
+        | ExprT::MallocArray(_, a)
+        | ExprT::CallocArray(_, a)
+        | ExprT::MallocFlex(_, a)
+        | ExprT::CallocFlex(_, a)
+        | ExprT::MemsetZero(_, a)
+        | ExprT::Free(a)
+        | ExprT::PreIncr(a)
+        | ExprT::PostIncr(a)
+        | ExprT::PreDecr(a)
+        | ExprT::PostDecr(a) => walk_expr_tree(a, f),
+        // Two sub-expressions.
+        ExprT::Index(a, b) | ExprT::BinOp(_, a, b) | ExprT::AssignExpr(a, b) => {
+            walk_expr_tree(a, f);
+            walk_expr_tree(b, f);
+        }
+        // Three sub-expressions.
+        ExprT::Cond(a, b, c) | ExprT::Memset(_, a, b, c) => {
+            walk_expr_tree(a, f);
+            walk_expr_tree(b, f);
+            walk_expr_tree(c, f);
+        }
+        // Sequences.
+        ExprT::FnCall(_, args) => args.iter().for_each(|a| walk_expr_tree(a, f)),
+        ExprT::FnPtrCall(callee, args) => {
+            walk_expr_tree(callee, f);
+            args.iter().for_each(|a| walk_expr_tree(a, f));
+        }
+        ExprT::StructInit(_, fields) => fields.iter().for_each(|(_, a)| walk_expr_tree(a, f)),
+        ExprT::ArrayInit { elems, .. } => elems.iter().for_each(|a| walk_expr_tree(a, f)),
+    }
+}
+
+impl Expr {
+    /// Does this expression contain an `Error` node -- the residue of a
+    /// failure that a translation phase has already reported? Later phases
+    /// skip such an expression rather than report about it again.
+    pub fn contains_error(&self) -> bool {
+        let mut found = false;
+        walk_expr_tree(self, &mut |e| found |= matches!(e.val, ExprT::Error(_)));
+        found
+    }
+}

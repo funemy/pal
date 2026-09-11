@@ -106,10 +106,16 @@ fn indirect_field_path(
 
 impl<'a> Elaborator<'a> {
     fn report(&mut self, msg: String, loc: &SourceInfo) {
+        self.report_with_detail(msg, None, loc);
+    }
+
+    fn report_with_detail(&mut self, msg: String, detail: Option<String>, loc: &SourceInfo) {
         self.diags.report(Diagnostic {
             loc: loc.location().clone(),
             level: DiagnosticLevel::Error,
-            msg: msg,
+            msg,
+            pass: None,
+            detail,
         });
     }
 
@@ -117,10 +123,13 @@ impl<'a> Elaborator<'a> {
         match env.infer_expr(rval) {
             Ok(ty) => Some(ty),
             Err(error) => {
-                self.report(
-                    format!("cannot infer type of {}: {}\n{}", rval, error, env),
-                    &rval.loc,
-                );
+                if !rval.contains_error() {
+                    self.report_with_detail(
+                        format!("cannot infer type of {}: {}", rval, error),
+                        Some(format!("{}", env)),
+                        &rval.loc,
+                    );
+                }
                 None
             }
         }
@@ -1371,6 +1380,8 @@ fn build_pointer_views(
                     "_pointer_view typedef `{}` must be a pointer to a named type",
                     td.name
                 ),
+                pass: None,
+                detail: None,
             });
             continue;
         };
@@ -1383,6 +1394,8 @@ fn build_pointer_views(
                     "duplicate _pointer_view for the same pointee: `{}` conflicts with `{}`",
                     td.name, existing
                 ),
+                pass: None,
+                detail: None,
             });
             continue;
         }

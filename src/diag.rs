@@ -51,10 +51,32 @@ impl DiagnosticLevel {
 pub struct Diagnostic {
     pub loc: Location,
     pub level: DiagnosticLevel,
+    /// A single line.
     pub msg: String,
+    /// When the internal well-formedness check reported this: the pass it
+    /// ran after. `None` for a translation phase's own diagnostics.
+    pub pass: Option<String>,
+    /// A multi-line elaboration shown after the message -- the environment
+    /// dump of a type-inference failure. Not part of the diagnostic's
+    /// identity (see `Diagnostics::report`).
+    pub detail: Option<String>,
 }
 
 impl Diagnostic {
+    /// The message with the pass and detail folded in, for a consumer that
+    /// takes one string.
+    pub fn full_message(&self) -> String {
+        let mut s = self.msg.clone();
+        if let Some(pass) = &self.pass {
+            s.push_str(&format!(" (internal check after {})", pass));
+        }
+        if let Some(detail) = &self.detail {
+            s.push('\n');
+            s.push_str(detail);
+        }
+        s
+    }
+
     pub fn to_lsp(&self) -> lsp_types::Diagnostic {
         lsp_types::Diagnostic {
             range: self.loc.range.to_lsp(),
@@ -62,7 +84,7 @@ impl Diagnostic {
             code: None,
             code_description: None,
             source: None,
-            message: self.msg.clone(),
+            message: self.full_message(),
             related_information: None,
             tags: None,
             data: None,
@@ -80,12 +102,25 @@ impl Diagnostics {
         Diagnostics { diags: vec![] }
     }
 
+    /// Record `diag` unless the same problem -- same location, level and
+    /// message -- is recorded already. The well-formedness check runs after
+    /// several passes and finds a broken node on every run; only the first
+    /// report survives, naming the earliest pass. Which pass, and any
+    /// detail, are not part of the comparison.
     pub fn report(&mut self, diag: Diagnostic) {
-        self.diags.push(diag)
+        let is_dup = self
+            .diags
+            .iter()
+            .any(|d| d.loc == diag.loc && d.level == diag.level && d.msg == diag.msg);
+        if !is_dup {
+            self.diags.push(diag)
+        }
     }
 
     pub fn merge(&mut self, other: Diagnostics) {
-        self.diags.extend(other.diags);
+        for diag in other.diags {
+            self.report(diag);
+        }
     }
 
     pub fn has_errors(&self) -> bool {
@@ -108,6 +143,19 @@ impl Diagnostics {
                 Diagnostic::warning()
             };
             d = d.with_message(&diag.msg);
+            let mut notes = Vec::new();
+            if let Some(pass) = &diag.pass {
+                notes.push(format!(
+                    "reported by the internal well-formedness check after the {} pass",
+                    pass
+                ));
+            }
+            if let Some(detail) = &diag.detail {
+                notes.push(detail.clone());
+            }
+            if !notes.is_empty() {
+                d = d.with_notes(notes);
+            }
             let file_name = &*diag.loc.file_name;
             let file_id = *file_ids.entry(file_name).or_insert_with(|| {
                 files.add(

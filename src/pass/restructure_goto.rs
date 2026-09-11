@@ -121,6 +121,8 @@ fn check_gotos_stmt(diags: &mut Diagnostics, stmt: &Stmt, innermost: Option<&str
                          following label of the enclosing block is supported",
                         label.val
                     ),
+                    pass: None,
+                    detail: None,
                 });
             }
         }

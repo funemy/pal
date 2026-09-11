@@ -414,6 +414,8 @@ impl<'a> Ctx<'a> {
                 DiagnosticLevel::Warning
             }),
             msg: msg.into(),
+            pass: None,
+            detail: None,
         })
     }
 }
